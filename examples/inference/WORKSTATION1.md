@@ -83,14 +83,35 @@ ahead of the measured joints, which at Kp=100 is ~2-4 Nm against ~1.1 Nm joint f
 validates the pipeline: DRP was trained on two fixed cameras `front_left` / `front_right` behind the base
 (nominal eye (-0.35, +-1.0, 1.2) m looking at (0.5, -+0.05, 0.5), 320x240, D415 FOV), not on a wrist camera.
 
-The two front D415s are connected (front_left 747612060067, front_right 947122060531). The eval with live
-cameras runs in the viser panel (Jim-Young6709/franka_control, branch `workstation1-rcs`), which drives the arm
-through rcs_fr3's joint impedance controller as well:
+## Real-world eval: the DRP viser panel on RCS
+
+`drp_viser_app.py` is the deployment UI: the controls of the previous robot PC's panel (checkpoint dropdown,
+activate / stop / closed-loop rollout, exec sliders, EE gizmo + IK goal, saved goals A/B + ping-pong, home + recover,
+gripper, camera views with noise ablation and table mask, 3D scene), built on RCS:
+
+- robot, gripper and cameras through the RCS env (`drp_viser/envs.py`): every motion, homing included, through
+  rcs_fr3's joint impedance controller (gains/limits from `franka.json`), the Robotiq through rcs_robotiq2f85 with
+  activation on the panel's button (`activate_on_init=False`), the two front D415s through rcs_realsense with
+  `DRP_D415_KWARGS` (320x240 colour, 848x480 depth aligned onto it, the drp_deploy depth post-processing
+  disparity -> spatial -> temporal -> depth -> hole filling, true intrinsics);
+- one vlagents `drp` server per checkpoint of `~/drp/ckpt_active` on ports 20101.. (`drp_viser/policies.py`), all
+  started at launch, so switching checkpoints is instant; the agent's meta query tells the panel each checkpoint's
+  inputs;
+- `drp_viser/runner.py`: one thread owns the env and steps it at 30 Hz (hold / policy waypoints through
+  `WaypointShaper` / quintic homing); the UI only changes state and settings;
+- FR3 kinematics (gizmo IK, eef goal check) and the 3D scene from RCS's FR3 / Robotiq MJCF models.
 
 ```shell
-~/launch_scripts/realworld_launch.sh      # pre-flight checks, then the panel; --help for options
+~/launch_scripts/realworld_launch.sh                # = examples/inference/realworld_launch.sh: checks, then the panel
+~/launch_scripts/realworld_launch.sh --blind        # robot without cameras (noise views)
+~/launch_scripts/realworld_launch.sh --platform sim # RCS MuJoCo sim dry run
+~/launch_scripts/realworld_launch.sh --preflight-only
 ```
 
-`franka.py` here stays blind (`camera_source: "noise"`): rcs_realsense captures depth at the colour resolution
-with the IR emitter off and no hole filling, which is not the depth these checkpoints were validated on (848x480
-aligned onto 320x240 colour, spatial filter, emitter on; see franka_control `drp_control/cameras.py`).
+The launcher runs `realworld_preflight.py` (read-only: robot mode, Desk end effector mass, other FCI clients /
+panels / camera users, both D415s on USB3, the Robotiq adapter, GPU, checkpoints, the fork patches), starts the panel,
+opens it in the browser and keeps everything in `~/drp/logs/realworld/<date>-<time>/` (session log + policy server
+logs). Nothing moves until a button is pressed: once connected the impedance controller holds the measured pose.
+Ctrl-C once: the arm is brought to rest, robot / cameras / gripper are closed, then the policy servers are stopped.
+
+`franka.py` stays the blind (noise) client of a single policy server.

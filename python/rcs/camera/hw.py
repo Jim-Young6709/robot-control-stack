@@ -4,7 +4,7 @@ import typing
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from time import sleep
+from time import perf_counter, sleep
 
 import cv2
 import numpy as np
@@ -150,13 +150,30 @@ class HardwareCameraSet(BaseCameraSet):
     def buffer_size(self) -> int:
         return len(self._buffer) - self._buffer.count(None)
 
-    def wait_for_frames(self, timeout: float = 10.0):
+    def wait_for_frames(self, timeout: float | None = None):
+        """Blocks until a frame set is buffered.
+
+        timeout None: 10 s, or longer when a camera declares `startup_timeout_s` (e.g. a RealSense set that may
+        hardware-reset a device while opening). Raises RuntimeError on timeout or when the polling thread died.
+        """
+        if timeout is None:
+            timeout = max([10.0] + [float(getattr(camera, "startup_timeout_s", 0.0)) for camera in self.cameras])
+        deadline = perf_counter() + timeout
         while self.buffer_size() == 0:
+            if self._thread is not None and not self._thread.is_alive():
+                msg = "Camera polling thread stopped before delivering a frame (see its traceback above)"
+                self._logger.error(msg)
+                raise RuntimeError(msg)
+            if perf_counter() > deadline:
+                msg = f"Timeout waiting for frames ({timeout:.0f} s)"
+                self._logger.error(msg)
+                raise RuntimeError(msg)
             sleep(0.1)
-            timeout -= 0.1
-            if timeout < 0:
-                self._logger.error("Timeout waiting for frames")
-                raise
+
+    @property
+    def polling_alive(self) -> bool:
+        """False once the polling thread has stopped, e.g. after a camera error; the buffer then goes stale."""
+        return self._thread is not None and self._thread.is_alive()
 
     def get_latest_frames(self) -> FrameSet | None:
         """Should return the latest frame from the camera with the given name."""
@@ -250,7 +267,7 @@ class HardwareCameraSet(BaseCameraSet):
             with self._buffer_lock:
                 self._buffer[self._next_ring_index] = frame_set
                 self._next_ring_index = (self._next_ring_index + 1) % self.max_buffer_frames
-                self._buffer_len = max(self._buffer_len + 1, self.max_buffer_frames)
+                self._buffer_len = min(self._buffer_len + 1, self.max_buffer_frames)
             # video recording
             for camera_key, writer in self.writer.items():
                 if frame_set is not None:
