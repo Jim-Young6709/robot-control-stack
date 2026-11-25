@@ -54,6 +54,8 @@ class RunConfig:
     joint_limit_margin, max_waypoint_jump, max_joint_speed and max_joint_accel from here."""
 
     fps: float = 30.0
+    #: multiplies the policy's step (chunk waypoint - the joints it was given) before shaping; 1.0 = as predicted
+    action_scale: float = 1.0
     exec_steps: int = 1
     exec_rate_hz: float = 30.0
     max_waypoint_jump: float = 0.35
@@ -83,6 +85,11 @@ class RunStats:
     last_chunk_max_step: float = float("nan")
     clamped_waypoints: int = 0
     started_at: float | None = None
+    #: largest |waypoint - q| of the last chunk after action scaling [rad]
+    last_lead: float = float("nan")
+    #: largest commanded / measured joint speed of the last step [rad/s]
+    cmd_speed: float = 0.0
+    meas_speed: float = 0.0
 
 
 def _franka_errors() -> tuple:
@@ -486,6 +493,12 @@ class PanelRunner:
 
     def _ingest(self, obs: dict, info: dict) -> None:
         self._q = np.asarray(obs[KEY]["joints"], dtype=np.float64)
+        dq = obs[KEY].get("robot_state", {}).get("dq") if isinstance(obs[KEY].get("robot_state"), dict) else None
+        if dq is None and info:
+            dq = (info.get(KEY) or {}).get("dq")
+        if dq is not None:
+            self.stats.meas_speed = float(np.max(np.abs(np.asarray(dq, dtype=np.float64))))
+        self.stats.cmd_speed = float(np.max(np.abs(self._shaper.vel)))
         if self.platform == RobotPlatform.HARDWARE:
             mode = self._robot.get_state().robot_state.robot_mode.name.removeprefix("k")
         else:
@@ -619,6 +632,10 @@ class PanelRunner:
                 return
             self.stats.last_inference_ms = 1000.0 * (time.perf_counter() - t0)
             self.stats.last_chunk_max_step = float(np.max(np.abs(np.diff(np.vstack([q, chunk]), axis=0))))
+            scale = float(cfg.action_scale)
+            if scale != 1.0:  # stretch the predicted motion about the joints the policy saw
+                chunk = q + scale * (chunk - q)
+            self.stats.last_lead = float(np.max(np.abs(chunk[0] - q)))
             self.stats.chunks += 1
             self._chunk, self._chunk_idx, self._wp_tick = chunk, 0, 0
             self._publish_cameras(policy_frames, f"policy input ({name})")

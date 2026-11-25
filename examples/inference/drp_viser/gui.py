@@ -119,12 +119,23 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
             "Exec rate [Hz]", min=2.0, max=float(runner.control_hz), step=1.0, initial_value=cfg.exec_rate_hz,
             hint=f"How often a new waypoint is taken from the policy. The RCS control loop itself runs at "
                  f"{runner.control_hz:.0f} Hz and tracks the latest waypoint within the velocity/acceleration limits.")
+        sld_scale = server.gui.add_slider(
+            "Action scale", min=0.5, max=3.0, step=0.1, initial_value=cfg.action_scale,
+            hint="Multiplies the policy's step (each chunk waypoint minus the joints it was given) before shaping. "
+                 "1.0 = as predicted. >1 points the arm further along the predicted motion, so it moves faster; the "
+                 "jump cap, velocity and acceleration limits below still apply. Outside what the policy was trained "
+                 "on, so raise it gradually.")
         sld_jump = server.gui.add_slider(
             "Max waypoint jump [rad]", min=0.05, max=0.60, step=0.05, initial_value=cfg.max_waypoint_jump,
             hint="Clamps how far one target may sit from the measured pose; a wild prediction is scaled down.")
         sld_vel = server.gui.add_slider(
             "Stream max vel [rad/s]", min=0.05, max=1.5, step=0.05, initial_value=cfg.max_joint_speed,
-            hint="Velocity limit of the commanded joint target (with 2 rad/s^2 acceleration limit). Immediate.")
+            hint="Velocity limit of the commanded joint target, per joint. Immediate.")
+        sld_acc = server.gui.add_slider(
+            "Stream max accel [rad/s^2]", min=0.5, max=10.0, step=0.5, initial_value=cfg.max_joint_accel,
+            hint="Acceleration limit of the commanded joint target. It also sets how early the target slows down "
+                 "before each waypoint (stop distance v^2/2a): with the policy's short steps this, more than the "
+                 "velocity limit, decides the speed. Also used to come to rest on Stop.")
         sld_ee_tol_cm = server.gui.add_slider(
             "EE goal tol [cm]", min=0.5, max=5.0, step=0.5, initial_value=cfg.goal_tolerance_m * 100.0,
             hint="Goal-pose checkpoints (goal eef) only: the run ends when the flange is this close to its pose at "
@@ -164,6 +175,8 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
     sld_rate.on_update(lambda _: setattr(cfg, "exec_rate_hz", float(sld_rate.value)))
     sld_jump.on_update(lambda _: setattr(cfg, "max_waypoint_jump", float(sld_jump.value)))
     sld_vel.on_update(lambda _: setattr(cfg, "max_joint_speed", float(sld_vel.value)))
+    sld_acc.on_update(lambda _: setattr(cfg, "max_joint_accel", float(sld_acc.value)))
+    sld_scale.on_update(lambda _: setattr(cfg, "action_scale", float(sld_scale.value)))
     sld_ee_tol_cm.on_update(lambda _: setattr(cfg, "goal_tolerance_m", float(sld_ee_tol_cm.value) / 100.0))
     sld_ee_tol_deg.on_update(lambda _: setattr(cfg, "goal_tolerance_deg", float(sld_ee_tol_deg.value)))
 
@@ -509,7 +522,9 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
                 st = snap["stats"]
                 txt_stats.value = (f"chunks {st.chunks}  waypoints {st.waypoints}\n"
                                    f"inference {st.last_inference_ms:.1f} ms\n"
-                                   f"chunk max step {st.last_chunk_max_step:.4f} rad\n"
+                                   f"chunk max step {st.last_chunk_max_step:.4f} rad, lead x{cfg.action_scale:.1f} "
+                                   f"{st.last_lead:.3f} rad\n"
+                                   f"speed cmd {st.cmd_speed:.2f} / measured {st.meas_speed:.2f} rad/s\n"
                                    f"clamped waypoints {st.clamped_waypoints}")
                 g = snap["gripper"]
                 txt_grip.value = g["text"]
