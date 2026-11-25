@@ -137,6 +137,19 @@ class DepthMask:
     footprint_margin_m: float = 0.65
     planes: dict = field(default_factory=dict)
 
+    _ray_cache: dict = field(default_factory=dict, repr=False)
+
+    def _rays(self, shape, K: np.ndarray) -> np.ndarray:
+        """HxWx3 camera rays with z = 1 (points = rays * depth), cached per image size and K: the mask runs at the
+        policy rate."""
+        key = (shape, np.asarray(K, dtype=np.float32).tobytes())
+        rays = self._ray_cache.get(key)
+        if rays is None:
+            rays = unproject(np.ones(shape, dtype=np.float32), np.asarray(K, dtype=np.float32))
+            self._ray_cache.clear()
+            self._ray_cache[key] = rays
+        return rays
+
     def fit(self, slot: str, depth_m: np.ndarray, K: np.ndarray) -> "TablePlane | None":
         plane = fit_table_plane(depth_m, K)
         if plane is None:
@@ -154,7 +167,7 @@ class DepthMask:
         plane = self.planes.get(slot)
         if self.use_plane and plane is not None and K is not None:
             valid = d > 0
-            pts = unproject(d, K)[valid]
+            pts = self._rays(d.shape, K)[valid] * d[valid][:, None]
             h = pts @ plane.normal + plane.offset
             keep = (h >= self.min_height_m) & (h <= self.max_height_m)
             keep &= plane.outside_distance(pts) <= self.footprint_margin_m

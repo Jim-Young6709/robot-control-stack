@@ -97,7 +97,8 @@ gripper, camera views with noise ablation and table mask, 3D scene), built on RC
 - one vlagents `drp` server per checkpoint of `~/drp/ckpt_active` on ports 20101.. (`drp_viser/policies.py`), all
   started at launch, so switching checkpoints is instant; the agent's meta query tells the panel each checkpoint's
   inputs;
-- `drp_viser/runner.py`: one thread owns the env and steps it at 30 Hz (hold / policy waypoints through
+- `drp_viser/runner.py`: one thread owns the env and steps it at the control rate (`--control-hz`, default 70; policy
+  rate up to that, slider; hold / policy waypoints through
   `WaypointShaper` / quintic homing); the UI only changes state and settings;
 - FR3 kinematics (gizmo IK, eef goal check) and the 3D scene from RCS's FR3 / Robotiq MJCF models.
 
@@ -118,6 +119,7 @@ also temporal off 9-11%; raw aligned depth 9-11% / 70-76%; emitter off as well 9
 ~/launch_scripts/realworld_launch.sh --blind        # robot without cameras (noise views)
 ~/launch_scripts/realworld_launch.sh --platform sim # RCS MuJoCo sim dry run
 ~/launch_scripts/realworld_launch.sh --preflight-only
+~/launch_scripts/realworld_launch.sh --camera-fps 60   # D415s at 60 fps (default 30)
 ```
 
 The launcher runs `realworld_preflight.py` (read-only: robot mode, Desk end effector mass, other FCI clients /

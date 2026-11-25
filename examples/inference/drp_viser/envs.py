@@ -22,7 +22,8 @@ FRONT_D415 = {"front_left": "747612060067", "front_right": "947122060531"}
 CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS = 320, 240, 30
 
 
-def make_hw_env(cfg: "franka.InferenceConfig", cameras: bool = True) -> gym.Env:
+def make_hw_env(cfg: "franka.InferenceConfig", cameras: bool = True, camera_fps: int = CAMERA_FPS) -> gym.Env:
+    """cfg.fps is the control rate: env step pacing and the impedance controller's interpolation window."""
     from rcs_fr3.configs import DefaultFR3HardwareEnv
     from rcs_fr3.creators import (
         FR3MultiHardwareEnvCreatorConfig,
@@ -59,7 +60,7 @@ def make_hw_env(cfg: "franka.InferenceConfig", cameras: bool = True) -> gym.Env:
                 camera_type_id="realsense",
                 camera_cfgs={
                     slot: rcs.common.BaseCameraConfig(identifier=serial, resolution_width=CAMERA_WIDTH,
-                                                      resolution_height=CAMERA_HEIGHT, frame_rate=CAMERA_FPS)
+                                                      resolution_height=CAMERA_HEIGHT, frame_rate=int(camera_fps))
                     for slot, serial in FRONT_D415.items()
                 },
                 kwargs=dict(DRP_D415_KWARGS),

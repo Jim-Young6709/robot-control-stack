@@ -52,6 +52,10 @@ def main() -> int:
     p.add_argument("--policy-port", type=int, default=BASE_PORT, help="port of the first policy server")
     p.add_argument("--log-dir", default=str(Path.home() / "drp/logs/realworld"), help="policy server logs")
     p.add_argument("--blind", action="store_true", help="hardware without opening the cameras: noise in both views")
+    p.add_argument("--control-hz", type=int, default=70,
+                   help="control loop rate: env steps, impedance interpolation window, upper limit of the policy rate")
+    p.add_argument("--policy-hz", type=float, default=30.0, help="initial policy (exec) rate, the GUI slider changes it")
+    p.add_argument("--camera-fps", type=int, choices=[30, 60], default=30, help="D415 frame rate (colour and depth)")
     p.add_argument("--noise", nargs="*", default=None, metavar="SLOT",
                    help="camera slots to start with 'Noise out' ON (front_left, front_right)")
     p.add_argument("--config", default=None, help="franka.json-style config (gains, limits, fps); default franka.json")
@@ -73,10 +77,12 @@ def main() -> int:
     if args.no_high_collision:
         cfg.allow_high_collision = False
     platform = RobotPlatform.HARDWARE if args.platform == "hw" else RobotPlatform.SIMULATION
+    cfg.fps = int(args.control_hz)  # the panel's control rate (franka.json's fps stays franka.py's)
     run_cfg = RunConfig(
         fps=float(cfg.fps), max_waypoint_jump=cfg.max_waypoint_jump, max_joint_speed=cfg.max_joint_speed,
         max_joint_accel=cfg.max_joint_accel, joint_limit_margin=cfg.joint_limit_margin,
-        goal_tolerance_rad=cfg.goal_tolerance_rad, exec_rate_hz=float(cfg.fps), home_max_speed=cfg.home_max_speed,
+        goal_tolerance_rad=cfg.goal_tolerance_rad, exec_rate_hz=min(float(args.policy_hz), float(cfg.fps)),
+        home_max_speed=cfg.home_max_speed,
         home_min_time=cfg.home_min_time, home_settle_tol=cfg.home_settle_tol,
         home_settle_timeout=cfg.home_settle_timeout,
     )
@@ -131,8 +137,9 @@ def main() -> int:
         m = cfg.joint_limit_margin
         kin = RcsKinematics(joint_limits=np.stack([franka.FR3_Q_MIN + m, franka.FR3_Q_MAX - m]))
         if platform == RobotPlatform.HARDWARE:
-            print("connecting to the FR3, the gripper port" + ("" if args.blind else " and both front D415s") + " ...")
-            make_env = lambda: make_hw_env(cfg, cameras=not args.blind)  # noqa: E731
+            print(f"connecting to the FR3 (control {cfg.fps} Hz), the gripper port"
+                  + ("" if args.blind else f" and both front D415s ({args.camera_fps} fps)") + " ...")
+            make_env = lambda: make_hw_env(cfg, cameras=not args.blind, camera_fps=args.camera_fps)  # noqa: E731
         else:
             print("starting the RCS MuJoCo sim (FR3 + Robotiq, emulated joint impedance, noise cameras) ...")
             make_env = lambda: make_sim_env(cfg, headless=True)  # noqa: E731

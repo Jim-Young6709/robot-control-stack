@@ -92,6 +92,27 @@ class RunStats:
     meas_speed: float = 0.0
 
 
+class RateMeter:
+    """Events per second over a sliding window of event times [s]; 0 once nothing arrived for `stale_s`."""
+
+    def __init__(self, window_s: float = 2.0, stale_s: float = 1.0):
+        self.window_s, self.stale_s = window_s, stale_s
+        self.times: list = []
+        self.last_arrival = 0.0
+
+    def add(self, t: float) -> None:
+        self.times.append(t)
+        self.last_arrival = time.monotonic()
+        while self.times and self.times[0] < t - self.window_s:
+            self.times.pop(0)
+
+    def hz(self) -> float:
+        if len(self.times) < 2 or time.monotonic() - self.last_arrival > self.stale_s:
+            return 0.0
+        span = self.times[-1] - self.times[0]
+        return (len(self.times) - 1) / span if span > 0 else 0.0
+
+
 def _franka_errors() -> tuple:
     try:
         from rcs_fr3._core.hw import exceptions as ex
@@ -144,6 +165,7 @@ class PanelRunner:
         self._cam_snap: dict | None = None
         self._frames: dict = {}
         self._intrinsics: dict = {}
+        self._mask_cache: dict = {}
         self._frames_ts: float | None = None
         self._frames_seen_at = 0.0
 
@@ -156,7 +178,11 @@ class PanelRunner:
         self._grip_activating = False
         self._chunk: np.ndarray | None = None
         self._chunk_idx = 0
-        self._wp_tick = 0
+        self._phase = 0.0
+        self._rate_loop, self._rate_policy = RateMeter(), RateMeter()
+        self._rate_cams: dict = {}  # (slot, "rgb" | "depth") -> RateMeter over device timestamps
+        self._cam_last_ts: dict = {}
+        self._rates: dict = {}
         self._step_count = 0
         self._episode = 0
         self._home: dict | None = None
@@ -348,6 +374,11 @@ class PanelRunner:
             "gripper": snap.get("gripper") or {"closure": None, "text": "-"},
         }
 
+    def rates(self) -> dict:
+        """{"loop": Hz, "policy": Hz, "cameras": {slot: {"rgb": Hz, "depth": Hz}} or None without cameras}."""
+        with self._lock:
+            return dict(self._rates)
+
     def camera_snapshot(self) -> dict | None:
         with self._lock:
             return self._cam_snap
@@ -416,6 +447,8 @@ class PanelRunner:
                 result["value"] = f"failed: {type(exc).__name__}: {exc}"
             done.set()
 
+        self._rate_loop.add(time.monotonic())
+        self._update_camera_rates()
         state = self.state
         if state is not self._prev_state:
             self._on_transition(self._prev_state, state)
@@ -440,6 +473,29 @@ class PanelRunner:
         else:
             self._step(sh(self._hold, self._q))  # still decelerating onto it
 
+    def _update_camera_rates(self) -> None:
+        """Delivery rate of each camera stream from the device timestamps of the newest frames (thread-safe read of
+        the camera set's ring buffer), plus the loop and policy rates; published for the GUI."""
+        cams = None
+        cam_set = getattr(self, "_camera_set", None)
+        if cam_set is not None:
+            cams = {}
+            fs = cam_set.get_latest_frames()
+            for slot, frame in (fs.frames.items() if fs is not None else ()):
+                cams[slot] = {}
+                for kind, data in (("rgb", frame.camera.color), ("depth", frame.camera.depth)):
+                    if data is None:
+                        continue
+                    key = (slot, kind)
+                    meter = self._rate_cams.setdefault(key, RateMeter())
+                    if data.timestamp != self._cam_last_ts.get(key):
+                        self._cam_last_ts[key] = data.timestamp
+                        meter.add(float(data.timestamp))
+                    cams[slot][kind] = meter.hz()
+        rates = {"loop": self._rate_loop.hz(), "policy": self._rate_policy.hz(), "cameras": cams}
+        with self._lock:
+            self._rates = rates
+
     def _on_transition(self, old: State, new: State) -> None:
         if old in (State.RUNNING, State.RESETTING) and new in (State.IDLE, State.REACHED):
             # decelerate to the stopping point of the current command, then hold it
@@ -450,7 +506,7 @@ class PanelRunner:
             else:
                 self._hold = self._q.copy()
         if new is State.RUNNING:
-            self._chunk, self._chunk_idx, self._wp_tick = None, 0, 0
+            self._chunk, self._chunk_idx, self._phase = None, 0, 0.0
 
     def _resync_hold(self) -> None:
         q = self._read_q()
@@ -555,10 +611,19 @@ class PanelRunner:
     def _prepare(self, frames: dict) -> dict:
         """What the policy is fed: depth mask (range gate + optional table mask), then the noise ablation."""
         out = dict(frames)
+        m = self.depth_mask
         for slot in self.camera_slots:
             key = f"{slot}_depth"
             if key in out:
-                out[key] = self.depth_mask.apply(slot, out[key], self._intrinsics.get(slot))
+                # reuse the masked depth while the camera has not delivered a new frame (policy rate > camera fps)
+                ck = (self._frames_ts, m.use_range_gate, m.use_plane, id(m.planes.get(slot)), m.footprint_margin_m,
+                      m.min_height_m, m.max_height_m)
+                cached = self._mask_cache.get(slot)
+                if self._cam_wrapper is not None and self._frames_ts is not None and cached and cached[0] == ck:
+                    out[key] = cached[1]
+                else:
+                    out[key] = m.apply(slot, out[key], self._intrinsics.get(slot))
+                    self._mask_cache[slot] = (ck, out[key])
             if slot in self.config.noise_slots:
                 if slot in out:
                     out[slot] = self._rng.integers(0, 256, out[slot].shape, dtype=np.uint8)
@@ -616,9 +681,12 @@ class PanelRunner:
                                         f"{time.monotonic() - self._frames_seen_at:.1f} s")
             return
 
-        steps_per_wp = max(1, int(round(self.control_hz / max(cfg.exec_rate_hz, 1e-3))))
-        if self._chunk is None or (self._wp_tick % steps_per_wp == 0
-                                   and self._chunk_idx + 1 >= min(cfg.exec_steps, len(self._chunk))):
+        # a waypoint is due every 1/exec_rate s (phase accumulator: exact on average, at most one per step)
+        self._phase += min(1.0, max(cfg.exec_rate_hz, 0.1) / self.control_hz)
+        due = self._chunk is None or self._phase >= 1.0
+        if due and self._chunk is not None:
+            self._phase -= 1.0
+        if due and (self._chunk is None or self._chunk_idx + 1 >= min(cfg.exec_steps, len(self._chunk))):
             policy_frames = self._prepare(self._current_frames())
             obs = make_obs(q, goal, policy_frames, self._intrinsics, step=self.stats.chunks, episode=self._episode,
                            camera_keys=self.pool[name].meta["camera_keys"],
@@ -637,13 +705,13 @@ class PanelRunner:
                 chunk = q + scale * (chunk - q)
             self.stats.last_lead = float(np.max(np.abs(chunk[0] - q)))
             self.stats.chunks += 1
-            self._chunk, self._chunk_idx, self._wp_tick = chunk, 0, 0
+            self._chunk, self._chunk_idx = chunk, 0  # the phase keeps its remainder: exact rate on average
+            self._rate_policy.add(time.monotonic())
             self._publish_cameras(policy_frames, f"policy input ({name})")
             self._count_waypoint(q)
-        elif self._wp_tick % steps_per_wp == 0:
+        elif due:
             self._chunk_idx = min(self._chunk_idx + 1, len(self._chunk) - 1)
             self._count_waypoint(q)
-        self._wp_tick += 1
         self._step(self._shaper(self._chunk[self._chunk_idx], q))
 
     def _count_waypoint(self, q: np.ndarray) -> None:

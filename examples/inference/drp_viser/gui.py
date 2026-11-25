@@ -117,8 +117,10 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
                  "eval executes 1.")
         sld_rate = server.gui.add_slider(
             "Exec rate [Hz]", min=2.0, max=float(runner.control_hz), step=1.0, initial_value=cfg.exec_rate_hz,
-            hint=f"How often a new waypoint is taken from the policy. The RCS control loop itself runs at "
-                 f"{runner.control_hz:.0f} Hz and tracks the latest waypoint within the velocity/acceleration limits.")
+            hint=f"How often the policy is asked for a new waypoint (up to the control rate). The RCS control "
+                 f"loop runs at {runner.control_hz:.0f} Hz and tracks the latest waypoint within the velocity / "
+                 f"acceleration limits. The cameras deliver 30 or 60 fps, so faster rates re-plan from fresh joint "
+                 f"states but partly the same frames. The actual rates are shown in the Cameras tab.")
         sld_scale = server.gui.add_slider(
             "Action scale", min=0.5, max=3.0, step=0.1, initial_value=cfg.action_scale,
             hint="Multiplies the policy's step (each chunk waypoint minus the joints it was given) before shaping. "
@@ -328,6 +330,10 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
     blank = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
     cam_panel = server.gui.add_panel()
     with cam_panel.add_tab("Cameras"):
+        txt_rates = server.gui.add_text(
+            "Rates", initial_value="-", disabled=True, multiline=True,
+            hint="Measured: each camera stream's delivery rate (from the device timestamps of new frames), the policy "
+                 "rate (inference calls per second while running), the control loop rate, and this view's refresh.")
         views = {}
         for slot in runner.camera_slots:
             views[f"{slot}_rgb"] = server.gui.add_image(blank, label=slot, format="jpeg", jpeg_quality=70,
@@ -520,8 +526,10 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
                 if snap["q"] is not None:
                     txt_q.value = "\n".join(f"{n:<18} {v:+.4f}" for n, v in zip(JOINT_NAMES, snap["q"]))
                 st = snap["stats"]
+                rr = runner.rates()
                 txt_stats.value = (f"chunks {st.chunks}  waypoints {st.waypoints}\n"
-                                   f"inference {st.last_inference_ms:.1f} ms\n"
+                                   f"inference {st.last_inference_ms:.1f} ms | policy {rr.get('policy', 0.0):.1f} Hz, "
+                                   f"loop {rr.get('loop', 0.0):.1f} Hz\n"
                                    f"chunk max step {st.last_chunk_max_step:.4f} rad, lead x{cfg.action_scale:.1f} "
                                    f"{st.last_lead:.3f} rad\n"
                                    f"speed cmd {st.cmd_speed:.2f} / measured {st.meas_speed:.2f} rad/s\n"
@@ -570,6 +578,16 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
                             handle.label = want
                             handle.color = "red" if slot in noised else "gray"
                     refresh_depth_controls()
+                    r = runner.rates()
+                    cams = r.get("cameras")
+                    lines_r = ([f"{slot}: RGB {v.get('rgb', 0.0):4.1f} Hz | depth {v.get('depth', 0.0):4.1f} Hz"
+                                for slot, v in sorted(cams.items())] if cams is not None
+                               else ["cameras: none (sim / --blind: noise frames on demand)"])
+                    lines_r.append(f"policy {r.get('policy', 0.0):4.1f} Hz (set {cfg.exec_rate_hz:.0f}) | control "
+                                   f"loop {r.get('loop', 0.0):4.1f} Hz (set {runner.control_hz:.0f}) | view 5 Hz")
+                    rates_text = "\n".join(lines_r)
+                    if txt_rates.value != rates_text:
+                        txt_rates.value = rates_text
                     age = time.time() - snap["t"]
                     source = f"NOISE on {','.join(sorted(noised))}" if noised else snap["source"]
                     means = {s: float(np.asarray(frames[s]).mean()) for s in runner.camera_slots if s in frames}
