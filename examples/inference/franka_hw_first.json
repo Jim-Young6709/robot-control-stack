@@ -1,0 +1,95 @@
+{
+  "vlagents_host": "localhost",
+  "vlagents_port": 20000,
+  "vlagents_model": "drp",
+  "instruction": "reach the goal configuration",
+  "robot_keys": [
+    "right"
+  ],
+  "jpeg_encoding": false,
+  "on_same_machine": true,
+  "image_size": null,
+  "fps": 30,
+  "record_path": "inference_recordings_hw_first",
+  "n_action_steps": null,
+  "max_rel_mov_joints": 0.35,
+  "max_rel_mov_cart": [
+    0.5,
+    1.5707963267948966
+  ],
+  "joint_limit_margin": 0.05,
+  "max_waypoint_jump": 0.35,
+  "max_joint_speed": 0.3,
+  "max_joint_accel": 1.0,
+  "goal_tolerance_rad": 0.05,
+  "camera_source": "noise",
+  "noise_cameras": {
+    "front_left": {
+      "width": 320,
+      "height": 240,
+      "rgb": true,
+      "depth": true,
+      "depth_range_m": [
+        0.0,
+        3.0
+      ]
+    },
+    "front_right": {
+      "width": 320,
+      "height": 240,
+      "rgb": true,
+      "depth": true,
+      "depth_range_m": [
+        0.0,
+        3.0
+      ]
+    }
+  },
+  "noise_seed": 0,
+  "goal_joints": [
+    [
+      0.0,
+      -0.693,
+      0.0,
+      -2.0068,
+      0.0,
+      1.3138,
+      0.0
+    ]
+  ],
+  "default_gripper": 1.0,
+  "q_home": null,
+  "kp": [
+    600.0,
+    600.0,
+    600.0,
+    600.0,
+    250.0,
+    150.0,
+    50.0
+  ],
+  "kd": [
+    50.0,
+    50.0,
+    50.0,
+    50.0,
+    30.0,
+    25.0,
+    15.0
+  ],
+  "torque_limit": [
+    5.0,
+    5.0,
+    5.0,
+    5.0,
+    5.0,
+    5.0,
+    5.0
+  ],
+  "sim_emulate_impedance": true,
+  "log_dir": "inference_logs/hw_first",
+  "allow_high_collision": true,
+  "impedance_home": true,
+  "home_max_speed": 0.25,
+  "use_gripper": true
+}

@@ -25,3 +25,7 @@ CLAUDE.md
 uv.lock
 *.parquet
 wheelhouse
+
+# robots-workstation1 inference outputs
+inference_logs/
+inference_recordings*/

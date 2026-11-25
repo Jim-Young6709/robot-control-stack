@@ -1,1 +1,1 @@
-vlagents==0.3.0
+vlagents @ git+https://github.com/Jim-Young6709/vlagents.git@drp-agent
