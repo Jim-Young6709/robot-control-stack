@@ -1,4 +1,5 @@
 import logging
+import time
 
 import gymnasium as gym
 from rcs._core.common import RobotPlatform
@@ -34,8 +35,8 @@ put it into FCI mode before running this script. For a scripted way of unlocking
 fr3_direct_control.py example which uses the FCI context manager.
 """
 
-ROBOT_INSTANCE = RobotPlatform.SIMULATION
-FR3_IP = "192.168.101.1"
+ROBOT_INSTANCE = RobotPlatform.HARDWARE
+FR3_IP = "192.168.1.12"
 
 
 def main():
@@ -83,11 +84,16 @@ def main():
 
         env_creator = DefaultFR3HardwareEnv()
         env_creator.ip = FR3_IP
+        #env_creator.gripper_serial_number = "DAANTG8W"
         hw_cfg = env_creator.config()
         hw_cfg.control_mode = ControlMode.CARTESIAN_TQuat
+        hw_cfg.robot_cfg.async_control = True
+        hw_cfg.robot_cfg.allow_high_collision = True
         hw_cfg.camera_cfgs = None
         hw_cfg.max_relative_movement = 0.5
         hw_cfg.relative_to = RelativeTo.LAST_STEP
+        hw_cfg.robot_cfg.ignore_realtime = True
+        hw_cfg.gripper_cfg = None
         env_rel = env_creator.create_env(hw_cfg)
         input("the robot is going to move, press enter whenever you are ready")
 
@@ -101,10 +107,12 @@ def main():
             # move 1cm in x direction (forward) and close gripper
             act = {"tquat": [0.01, 0, 0, 0, 0, 0, 1], "gripper": [0]}
             obs, reward, terminated, truncated, info = env_rel.step(act)
+            time.sleep(10)
         for _ in range(10):
             # move 1cm in negative x direction (backward) and open gripper
             act = {"tquat": [-0.01, 0, 0, 0, 0, 0, 1], "gripper": [1]}
             obs, reward, terminated, truncated, info = env_rel.step(act)
+            time.sleep(1)
 
 
 if __name__ == "__main__":
