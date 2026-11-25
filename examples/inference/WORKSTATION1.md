@@ -101,6 +101,18 @@ gripper, camera views with noise ablation and table mask, 3D scene), built on RC
   `WaypointShaper` / quintic homing); the UI only changes state and settings;
 - FR3 kinematics (gizmo IK, eef goal check) and the 3D scene from RCS's FR3 / Robotiq MJCF models.
 
+Depth pipeline, every step switchable live in the panel's "Depth processing" tab (left panel):
+
+1. camera (rcs_realsense, per frame): IR emitter; 848x480 depth aligned onto the 320x240 colour (fixed); then
+   disparity domain -> spatial filter -> temporal filter -> back to depth -> hole filling (drp_deploy chain,
+   librealsense defaults); a device that stops delivering frames is restarted (`restart_attempts` 3);
+2. panel: range gate 0.01-3 m (the renders' clipping range; OFF also tells the policy server to skip its gate),
+   optional table-plane mask (fit, margin), per-camera noise ablation (Cameras tab);
+3. policy server (vlagents drp): metres x depth_scale (2 mm steps), pointmap from the true K.
+
+Measured on the two D415s (no depth / in 0.01-3 m): defaults 0.1-0.8% / 77-93%; hole filling off 6-8% / 73-77%;
+also temporal off 9-11%; raw aligned depth 9-11% / 70-76%; emitter off as well 9-15%.
+
 ```shell
 ~/launch_scripts/realworld_launch.sh                # = examples/inference/realworld_launch.sh: checks, then the panel
 ~/launch_scripts/realworld_launch.sh --blind        # robot without cameras (noise views)

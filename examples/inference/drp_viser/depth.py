@@ -129,6 +129,8 @@ class DepthMask:
     drop what is below the table, more than `max_height_m` above it, or further outside its outline than
     `footprint_margin_m` (from the rear cameras the arm's tall links stand well outside the visible table)."""
 
+    #: the renderer's clipping range (also applied by the policy server, which gets told when it is off)
+    use_range_gate: bool = True
     use_plane: bool = False
     min_height_m: float = -0.05
     max_height_m: float = 1.6
@@ -144,7 +146,11 @@ class DepthMask:
         return plane
 
     def apply(self, slot: str, depth_m: np.ndarray, K: "np.ndarray | None") -> np.ndarray:
-        d = np.where(np.isfinite(depth_m) & (depth_m >= NEAR_M) & (depth_m < FAR_M), depth_m, 0.0).astype(np.float32)
+        if self.use_range_gate:
+            d = np.where(np.isfinite(depth_m) & (depth_m >= NEAR_M) & (depth_m < FAR_M), depth_m, 0.0)
+        else:
+            d = np.where(np.isfinite(depth_m) & (depth_m > 0.0), depth_m, 0.0)
+        d = d.astype(np.float32)
         plane = self.planes.get(slot)
         if self.use_plane and plane is not None and K is not None:
             valid = d > 0

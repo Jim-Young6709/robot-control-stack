@@ -23,6 +23,26 @@ ALT_OFF_LABEL, ALT_ON_LABEL = "Toggle between two goals: OFF", "Toggle between t
 LOOP_START_LABEL, LOOP_STOP_LABEL = "Start closed-loop rollout", "Stop closed-loop rollout"
 WIDTH, HEIGHT = 320, 240
 
+#: camera-side depth post-processing steps (rcs_realsense DepthProcessing + emitter), in pipeline order
+CAMERA_DEPTH_STEPS = [
+    ("emitter", "IR emitter",
+     "The D415's IR dot projector: gives stereo matching texture on plain surfaces such as the table. OFF: depth only "
+     "where the scene itself has texture. A capture setting of the camera."),
+    ("disparity", "Disparity domain",
+     "Run the spatial and temporal filters on disparity (1/depth) instead of depth, as drp_deploy does, so far "
+     "surfaces are not over-smoothed. No effect while both filters are off."),
+    ("spatial", "Spatial filter",
+     "Edge-preserving smoothing within each frame (librealsense defaults: magnitude 2, alpha 0.5, delta 20, no hole "
+     "fill)."),
+    ("temporal", "Temporal filter",
+     "Smoothing over frames (alpha 0.4, delta 20) with persistence: a pixel valid in 2 of the last 4 frames keeps its "
+     "last value when it drops out. Lags fast motion a little; restarts with a fresh history when switched on."),
+    ("hole_filling", "Hole filling",
+     "Fills every pixel without depth from its farthest valid neighbour (librealsense 'farthest from around'): "
+     "stereo shadows beside objects get the background's depth instead of 0. The range gate / table mask then cut "
+     "far fills again."),
+]
+
 
 def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -> threading.Event:
     """Builds the panel and starts its refresh threads. Returns the event that stops them."""
@@ -310,20 +330,40 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
                      f"turn both on for the full blind test.")
             for slot in runner.camera_slots
         }
-    with cam_panel.add_tab("Depth mask"):
+    with cam_panel.add_tab("Depth processing"):
+        txt_chain = server.gui.add_text("Pipeline", initial_value="-", disabled=True, multiline=True,
+                                        hint="The depth the policy gets, in order. Every switch applies from the next "
+                                             "frame, also during a rollout; the camera views show the result.")
+        server.gui.add_markdown("**Camera** (rcs_realsense: 848x480 depth aligned onto the 320x240 colour, then "
+                                "per frame)")
+        depth_buttons = {
+            key: server.gui.add_button(f"{label}: ?", color="gray", hint=hint, disabled=not runner.has_realsense)
+            for key, label, hint in CAMERA_DEPTH_STEPS
+        }
+        server.gui.add_markdown("**Panel** (before the policy; noise ablation is in the Cameras tab)")
+        btn_gate = server.gui.add_button(
+            "Range gate 0.01-3 m: ON", color="green",
+            hint="The renderer's clipping range: depth outside 0.01-3 m becomes 0 ('nothing hit'), here and in the "
+                 "policy server. OFF passes the camera's whole range to the policy: an out-of-distribution ablation, "
+                 "the checkpoints were trained on clipped renders.")
+        btn_mask = server.gui.add_button(
+            "Table mask: OFF", color="gray",
+            hint="Zero depth below the table, more than 1.6 m above it, or further outside its outline than the "
+                 "margin below (the renders contain only table, objects and arm). Needs 'Fit table plane' first; "
+                 "applies to the cameras that have a fitted plane.")
         btn_fit_plane = server.gui.add_button(
             "Fit table plane",
             hint="RANSAC on each camera's current depth, while idle. Also reports the camera's height above the table "
                  "and its pitch against the renderer's (0.9-1.4 m, ~27 deg). Refit after moving a camera.")
-        chk_plane_mask = server.gui.add_checkbox(
-            "Mask to the table", initial_value=False,
-            hint="Zero depth below the table, more than 1.6 m above it, or further outside its outline than the "
-                 "margin below. Applies to the cameras that have a fitted plane.")
         num_margin = server.gui.add_number(
             "Outline margin [m]", initial_value=runner.depth_mask.footprint_margin_m, min=0.0, max=1.0, step=0.05,
             hint="How far outside the table's visible outline depth is still kept. From the rear cameras the arm's "
                  "tall links stand outside the visible table.")
         txt_plane = server.gui.add_text("Table plane", initial_value="not fitted", disabled=True, multiline=True)
+        btn_depth_defaults = server.gui.add_button(
+            "Restore defaults", color="blue",
+            hint="Emitter, disparity domain, spatial and temporal filter, hole filling and range gate ON (the "
+                 "drp_deploy chain); table mask OFF.")
     cam_panel.dock_left()
     cam_panel.set_width(360)
 
@@ -356,11 +396,71 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
         txt_plane.value = "\n".join(lines)
         say("table plane fitted" + ("" if runner.depth_mask.planes else ": none found"))
 
-    @chk_plane_mask.on_update
+    def toggle_camera_step(key: str, label: str):
+        def handler(_) -> None:
+            state = runner.depth_processing()
+            if not state:
+                say("no RealSense cameras in this session (sim / --blind)")
+                return
+            on = not bool(state.get(key))
+            if key == "emitter":
+                runner.set_emitter(on)
+            else:
+                runner.set_depth_processing(**{key: on})
+            say(f"depth: {label} {'ON' if on else 'OFF'} | camera chain: {runner.depth_processing().get('chain')}")
+        return handler
+
+    for _key, _label, _ in CAMERA_DEPTH_STEPS:
+        depth_buttons[_key].on_click(toggle_camera_step(_key, _label))
+
+    @btn_gate.on_click
     def _(_) -> None:
-        runner.depth_mask.use_plane = bool(chk_plane_mask.value)
-        say(f"table mask {'ON' if chk_plane_mask.value else 'OFF'}"
+        runner.depth_mask.use_range_gate = not runner.depth_mask.use_range_gate
+        say(f"depth range gate 0.01-3 m {'ON' if runner.depth_mask.use_range_gate else 'OFF (ablation)'}")
+
+    @btn_mask.on_click
+    def _(_) -> None:
+        runner.depth_mask.use_plane = not runner.depth_mask.use_plane
+        say(f"table mask {'ON' if runner.depth_mask.use_plane else 'OFF'}"
             + ("" if runner.depth_mask.planes else " (no plane fitted yet)"))
+
+    @btn_depth_defaults.on_click
+    def _(_) -> None:
+        if runner.has_realsense:
+            runner.set_emitter(True)
+            runner.set_depth_processing(disparity=True, spatial=True, temporal=True, hole_filling=True)
+        runner.depth_mask.use_range_gate = True
+        runner.depth_mask.use_plane = False
+        say("depth processing restored to the defaults")
+
+    def refresh_depth_controls() -> None:
+        """Labels follow the actual state (also after Restore defaults or a change elsewhere)."""
+        state = runner.depth_processing()
+        for key, label, _ in CAMERA_DEPTH_STEPS:
+            if not state:
+                want, colour = f"{label}: n/a (no RealSense)", "gray"
+            else:
+                on = bool(state.get(key))
+                want, colour = f"{label}: {'ON' if on else 'OFF'}", ("green" if on else "gray")
+            handle = depth_buttons[key]
+            if handle.label != want:
+                handle.label, handle.color = want, colour
+        mask = runner.depth_mask
+        for handle, on, label in ((btn_gate, mask.use_range_gate, "Range gate 0.01-3 m"),
+                                  (btn_mask, mask.use_plane, "Table mask")):
+            want = f"{label}: {'ON' if on else 'OFF'}"
+            if handle.label != want:
+                handle.label, handle.color = want, ("green" if on else "gray")
+        camera = (f"camera: align -> {state.get('chain', '?')} | emitter {'on' if state.get('emitter') else 'off'}"
+                  if state else "camera: none (sim / --blind: noise frames)")
+        panel = ("range gate 0.01-3 m" if mask.use_range_gate else "NO range gate")
+        panel += (" -> table mask" + ("" if mask.planes else " (no plane fitted: inactive)")) if mask.use_plane else ""
+        noised = sorted(cfg.noise_slots)
+        panel += f" -> noise on {', '.join(noised)}" if noised else ""
+        server_side = ("gate 0.01-3 m" if mask.use_range_gate else "no gate") + " -> metres x depth_scale (2 mm steps)"
+        text = f"{camera}\npanel: {panel}\npolicy server: {server_side}"
+        if txt_chain.value != text:
+            txt_chain.value = text
 
     @num_margin.on_update
     def _(_) -> None:
@@ -454,6 +554,7 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
                         if handle.label != want:
                             handle.label = want
                             handle.color = "red" if slot in noised else "gray"
+                    refresh_depth_controls()
                     age = time.time() - snap["t"]
                     source = f"NOISE on {','.join(sorted(noised))}" if noised else snap["source"]
                     means = {s: float(np.asarray(frames[s]).mean()) for s in runner.camera_slots if s in frames}

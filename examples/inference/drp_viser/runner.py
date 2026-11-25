@@ -305,6 +305,30 @@ class PanelRunner:
         self._grip_speed_force = (20.0 + speed * 130.0 / 255.0 + 1e-9, 20.0 + force * 215.0 / 255.0 + 1e-9)
         self._grip_dirty = True
 
+    # ------------------------------------------------------------------- depth post-processing (cameras)
+    def _realsense_sets(self) -> list:
+        cam_set = getattr(self, "_camera_set", None)
+        return [c for c in getattr(cam_set, "cameras", []) if hasattr(c, "set_depth_processing")]
+
+    @property
+    def has_realsense(self) -> bool:
+        return bool(self._realsense_sets())
+
+    def depth_processing(self) -> dict:
+        """Camera-side post-processing flags (disparity, spatial, temporal, hole_filling), emitter and the chain
+        description; {} without RealSense cameras (sim, --blind)."""
+        sets = self._realsense_sets()
+        return sets[0].depth_processing() if sets else {}
+
+    def set_depth_processing(self, **flags: bool) -> None:
+        """Switches steps on every camera while streaming (rcs_realsense applies them from the next frame)."""
+        for cam in self._realsense_sets():
+            cam.set_depth_processing(**flags)
+
+    def set_emitter(self, on: bool) -> None:
+        for cam in self._realsense_sets():
+            cam.enable_emitter(bool(on))
+
     def snapshot(self) -> dict:
         with self._lock:
             state, message, goal = self._state, self._message, self._goal
@@ -345,6 +369,7 @@ class PanelRunner:
                 self._gripper = None
             self._grip_wrapper = _find_wrapper(self.env, GripperWrapper)
             self._cam_wrapper = _find_wrapper(self.env, CameraSetWrapper)
+            self._camera_set = self._cam_wrapper.camera_set if self._cam_wrapper is not None else None
             self._ingest(obs, {})
             if self._gripper is not None:  # start from where the fingers are: nothing moves on startup
                 self._grip_width = float(np.clip(self._gripper.get_normalized_width(), 0.0, 1.0))
@@ -583,7 +608,8 @@ class PanelRunner:
                                    and self._chunk_idx + 1 >= min(cfg.exec_steps, len(self._chunk))):
             policy_frames = self._prepare(self._current_frames())
             obs = make_obs(q, goal, policy_frames, self._intrinsics, step=self.stats.chunks, episode=self._episode,
-                           camera_keys=self.pool[name].meta["camera_keys"])
+                           camera_keys=self.pool[name].meta["camera_keys"],
+                           depth_gate=bool(self.depth_mask.use_range_gate))
             t0 = time.perf_counter()
             try:
                 chunk = chunk_of(self.pool[name].act(obs))

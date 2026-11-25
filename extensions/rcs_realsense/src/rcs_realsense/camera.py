@@ -31,7 +31,7 @@ class RealSenseDevicePipeline:
     depth_to_color: common.Pose | None = None
     # created once per device (rs.align caches its mapping per stream profile; the temporal filter keeps history)
     align: rs.align | None = None
-    depth_filters: list | None = None
+    depth_processing: "DepthProcessing | None" = None
 
 
 #: Depth post-processing chains, applied to the delivered depth frame (after alignment when aligning), in order.
@@ -43,23 +43,67 @@ class RealSenseDevicePipeline:
 DEPTH_FILTER_CHAINS = ("drp_deploy", "spatial_fill8")
 
 
-def make_depth_filters(chain: str | None) -> list | None:
-    if chain is None:
-        return None
-    if chain == "drp_deploy":
-        return [
-            rs.disparity_transform(True),
-            rs.spatial_filter(),
-            rs.temporal_filter(),
-            rs.disparity_transform(False),
-            rs.hole_filling_filter(),
-        ]
-    if chain == "spatial_fill8":
-        spatial = rs.spatial_filter()
-        spatial.set_option(rs.option.holes_fill, 3.0)
-        return [spatial]
-    msg = f"depth_filters must be one of {DEPTH_FILTER_CHAINS} or None, got {chain!r}"
-    raise ValueError(msg)
+class DepthProcessing:
+    """Depth post-processing of one device, switchable step by step while streaming.
+
+    Order (as in drp_deploy): [to disparity] -> spatial -> temporal -> [back to depth] -> hole filling. The disparity
+    pair only wraps the spatial / temporal filters (they then smooth 1/depth, which keeps far surfaces from being
+    over-smoothed). Flags are plain attributes read once per frame by the polling thread, so they can be set from
+    any thread. Re-enabling the temporal filter starts it with a fresh history.
+    """
+
+    STEPS = ("disparity", "spatial", "temporal", "hole_filling")
+
+    def __init__(self, chain: str | None = None):
+        self.to_disparity = rs.disparity_transform(True)
+        self.to_depth = rs.disparity_transform(False)
+        self.spatial = rs.spatial_filter()  # magnitude 2, alpha 0.5, delta 20, no hole fill
+        self.temporal = rs.temporal_filter()  # alpha 0.4, delta 20, persistence "valid in 2 of last 4"
+        self.hole_filling = rs.hole_filling_filter()  # "farthest from around"
+        self.enabled = dict.fromkeys(self.STEPS, False)
+        self.chain = chain
+        if chain == "drp_deploy":
+            self.enabled.update(disparity=True, spatial=True, temporal=True, hole_filling=True)
+        elif chain == "spatial_fill8":
+            self.spatial.set_option(rs.option.holes_fill, 3.0)
+            self.enabled.update(spatial=True)
+        elif chain is not None:
+            msg = f"depth_filters must be one of {DEPTH_FILTER_CHAINS} or None, got {chain!r}"
+            raise ValueError(msg)
+
+    def set(self, **flags: bool) -> None:
+        unknown = set(flags) - set(self.STEPS)
+        if unknown:
+            msg = f"unknown depth processing step(s) {sorted(unknown)}, have {self.STEPS}"
+            raise ValueError(msg)
+        if flags.get("temporal") and not self.enabled["temporal"]:
+            self.temporal = rs.temporal_filter()  # no stale history from before it was switched off
+        self.enabled.update({k: bool(v) for k, v in flags.items()})
+
+    def process(self, frame: rs.frame) -> rs.frame:
+        on = dict(self.enabled)  # one consistent set of flags per frame
+        smooth = on["spatial"] or on["temporal"]
+        if smooth and on["disparity"]:
+            frame = self.to_disparity.process(frame)
+        if on["spatial"]:
+            frame = self.spatial.process(frame)
+        if on["temporal"]:
+            frame = self.temporal.process(frame)
+        if smooth and on["disparity"]:
+            frame = self.to_depth.process(frame)
+        if on["hole_filling"]:
+            frame = self.hole_filling.process(frame)
+        return frame
+
+    def describe(self) -> str:
+        on = self.enabled
+        steps = []
+        smooth = [n for n in ("spatial", "temporal") if on[n]]
+        if smooth:
+            steps.append(("disparity: " if on["disparity"] else "") + " + ".join(smooth))
+        if on["hole_filling"]:
+            steps.append("hole filling")
+        return " -> ".join(steps) or "none"
 
 
 #: Capture for the DRP checkpoints with the front D415s at 320x240: colour rgb8 320x240, depth z16 848x480 aligned onto
@@ -82,6 +126,7 @@ DRP_D415_KWARGS: dict[str, typing.Any] = {
     "warmup_frames": 15,
     "frame_timeout_ms": 5000,
     "hardware_reset_retry": True,
+    "restart_attempts": 3,
 }
 
 
@@ -111,6 +156,7 @@ class RealSenseCameraSet(HardwareCamera):
         warmup_frames: int = 0,
         frame_timeout_ms: int = 5000,
         hardware_reset_retry: bool = False,
+        restart_attempts: int = 0,
     ) -> None:
         """RealSense D400 camera set.
 
@@ -135,6 +181,9 @@ class RealSenseCameraSet(HardwareCamera):
             frame_timeout_ms: timeout of every wait_for_frames.
             hardware_reset_retry: if a device fails to start or sends no frames during warm-up, hardware-reset it
                 and try once more (not when the device is busy, i.e. held by another process).
+            restart_attempts: when a running device stops delivering frames (USB glitch, device reset), stop and
+                restart its pipeline up to this many times (2, 4, 5 s apart) before giving up, instead of ending the
+                polling thread at the first timeout. 0 keeps the previous behaviour.
         """
         self.enable_ir_emitter = enable_ir_emitter
         self.enable_ir = enable_ir
@@ -156,6 +205,7 @@ class RealSenseCameraSet(HardwareCamera):
         self.warmup_frames = int(warmup_frames)
         self.frame_timeout_ms = int(frame_timeout_ms)
         self.hardware_reset_retry = hardware_reset_retry
+        self.restart_attempts = int(restart_attempts)
         if calibration_strategy is None:
             calibration_strategy = {camera_name: DummyCalibrationStrategy() for camera_name in cameras}
         self.calibration_strategy = calibration_strategy
@@ -401,7 +451,7 @@ class RealSenseCameraSet(HardwareCamera):
                 translation=depth_to_color.translation, rotation=np.array(depth_to_color.rotation).reshape(3, 3)  # type: ignore
             ),
             align=rs.align(rs.stream.color) if self.align_depth_to_color else None,
-            depth_filters=make_depth_filters(self.depth_filters),
+            depth_processing=DepthProcessing(self.depth_filters),
         )
 
         self._frame_buffer[camera_name] = []
@@ -469,8 +519,13 @@ class RealSenseCameraSet(HardwareCamera):
         assert camera_name in self.camera_names, f"Camera {camera_name} not found in the enabled devices"
         device = self._enabled_devices[camera_name]
 
+        try:
+            frameset = device.pipeline.wait_for_frames(self.frame_timeout_ms)
+        except RuntimeError as exc:
+            if not self.restart_attempts:
+                raise
+            frameset = self._restart_device(camera_name, exc)
         streams = device.pipeline_profile.get_streams()
-        frameset = device.pipeline.wait_for_frames(self.frame_timeout_ms)
 
         if self.align_depth_to_color:
             # replaces the frameset with a composite frameset containing the aligned depth
@@ -521,9 +576,9 @@ class RealSenseCameraSet(HardwareCamera):
                 )
             elif rs.stream.depth == stream.stream_type():
                 frame = frameset.get_depth_frame()
-                for depth_filter in device.depth_filters or ():
+                if device.depth_processing is not None:
                     # on the frame that is delivered, i.e. after alignment (order of drp_deploy and drp_control)
-                    frame = depth_filter.process(frame)
+                    frame = device.depth_processing.process(frame)
                 assert device.depth_scale is not None, "Depth scale not found"
                 depth = DataFrame(
                     data=self._depth_to_rcs(to_numpy(frame), device.depth_scale),
@@ -567,11 +622,58 @@ class RealSenseCameraSet(HardwareCamera):
             device.pipeline.stop()
         self.disable_streams()
 
+    def _restart_device(self, camera_name: str, error: Exception):
+        """Restarts a device that stopped delivering frames (as drp_deploy's RealSense node does); returns the first
+        frameset of the new pipeline. Raises after `restart_attempts` failed restarts."""
+        device = self._enabled_devices[camera_name]
+        last: Exception = error
+        for attempt in range(1, self.restart_attempts + 1):
+            self._logger.warning(
+                "camera %s (%s) stopped delivering frames (%s): restarting its pipeline, attempt %d/%d",
+                camera_name, device.camera.serial, last, attempt, self.restart_attempts,
+            )
+            with contextlib.suppress(Exception):
+                device.pipeline.stop()
+            time.sleep(min(2.0 * attempt, 5.0))
+            try:
+                pipeline, profile = self._start_pipeline(camera_name, device.camera, self.enable_ir_emitter)
+                device.pipeline, device.pipeline_profile = pipeline, profile
+                if self.align_depth_to_color:
+                    device.align = rs.align(rs.stream.color)
+                if device.depth_processing is not None and device.depth_processing.enabled["temporal"]:
+                    device.depth_processing.temporal = rs.temporal_filter()  # no history across the gap
+                frameset = pipeline.wait_for_frames(self.frame_timeout_ms)
+                self._logger.info("camera %s (%s) is delivering frames again", camera_name, device.camera.serial)
+                return frameset
+            except Exception as exc:  # noqa: BLE001 - busy, not re-enumerated yet, ...
+                last = exc
+        msg = f"camera {camera_name} ({device.camera.serial}) did not recover after {self.restart_attempts} restarts: {last}"
+        raise RuntimeError(msg)
+
+    def set_depth_processing(self, **flags: bool) -> None:
+        """Switches depth post-processing steps (DepthProcessing.STEPS) of every device while streaming."""
+        for device in self._enabled_devices.values():
+            if device.depth_processing is not None:
+                device.depth_processing.set(**flags)
+
+    def depth_processing(self) -> dict[str, typing.Any]:
+        """Current post-processing flags (of the first device; all devices are switched together) and emitter."""
+        for device in self._enabled_devices.values():
+            if device.depth_processing is not None:
+                out: dict[str, typing.Any] = dict(device.depth_processing.enabled)
+                out["chain"] = device.depth_processing.describe()
+                sensor = device.pipeline_profile.get_device().first_depth_sensor()
+                if sensor.supports(rs.option.emitter_enabled):
+                    out["emitter"] = bool(sensor.get_option(rs.option.emitter_enabled))
+                return out
+        return {}
+
     def enable_emitter(self, enable_ir_emitter=True):
         """
         Enable/Disable the emitter of the intel realsense device
 
         """
+        self.enable_ir_emitter = bool(enable_ir_emitter)  # also used when a device is restarted
         for device in self._enabled_devices.values():
             # Get the active profile and enable the emitter for all the connected devices
             sensor = device.pipeline_profile.get_device().first_depth_sensor()
