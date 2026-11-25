@@ -208,7 +208,8 @@ class WaypointShaper:
             self.vel = np.zeros(7)
         d = w - self.cmd
         # largest speed from which we can still stop at w, and no overshoot within one period
-        v_cap = np.minimum(cfg.max_joint_speed, np.sqrt(2.0 * cfg.max_joint_accel * np.abs(d)))
+        # 0.8: deceleration headroom, the sqrt law alone lags one period and overshoots ~a*dt^2
+        v_cap = np.minimum(cfg.max_joint_speed, np.sqrt(2.0 * 0.8 * cfg.max_joint_accel * np.abs(d)))
         v_des = np.sign(d) * np.minimum(v_cap, np.abs(d) / dt)
         self.vel = self.vel + np.clip(v_des - self.vel, -cfg.max_joint_accel * dt, cfg.max_joint_accel * dt)
         self.cmd = self.cmd + self.vel * dt

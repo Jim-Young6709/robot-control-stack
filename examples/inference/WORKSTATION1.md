@@ -82,3 +82,15 @@ ahead of the measured joints, which at Kp=100 is ~2-4 Nm against ~1.1 Nm joint f
 `camera_source: "noise"` = blind test (uniform RGB 0-255, depth 0-3 m, nominal D415 intrinsics). This only
 validates the pipeline: DRP was trained on two fixed cameras `front_left` / `front_right` behind the base
 (nominal eye (-0.35, +-1.0, 1.2) m looking at (0.5, -+0.05, 0.5), 320x240, D415 FOV), not on a wrist camera.
+
+The two front D415s are connected (front_left 747612060067, front_right 947122060531). The eval with live
+cameras runs in the viser panel (Jim-Young6709/franka_control, branch `workstation1-rcs`), which drives the arm
+through rcs_fr3's joint impedance controller as well:
+
+```shell
+~/launch_scripts/realworld_launch.sh      # pre-flight checks, then the panel; --help for options
+```
+
+`franka.py` here stays blind (`camera_source: "noise"`): rcs_realsense captures depth at the colour resolution
+with the IR emitter off and no hole filling, which is not the depth these checkpoints were validated on (848x480
+aligned onto 320x240 colour, spatial filter, emitter on; see franka_control `drp_control/cameras.py`).
