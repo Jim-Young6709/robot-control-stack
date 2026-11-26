@@ -91,8 +91,11 @@ gripper, camera views with noise ablation and table mask, 3D scene), built on RC
 
 - robot, gripper and cameras through the RCS env (`drp_viser/envs.py`): every motion, homing included, through
   rcs_fr3's joint impedance controller (gains/limits from `franka.json`), the Robotiq through rcs_robotiq2f85 with
-  activation on the panel's button (`activate_on_init=False`), the two front D415s through rcs_realsense with
-  `DRP_D415_KWARGS` (320x240 colour, 848x480 depth aligned onto it, the drp_deploy depth post-processing
+  activation on the panel's button (`activate_on_init=False`), the two front cameras through rcs_realsense
+  (`drp_viser/envs.py` CAMERA_RIGS; since 2026-11-25 two D455 with `DRP_D455_KWARGS`: 640x480 colour + depth,
+  79.4 x 63.9 deg, resized by the panel to the policy's 320x240 with K scaled; `--camera-rig d415` = the previous
+  D415 pair, 320x240 colour + 848x480 depth; `--camera-crop 0.625` crops the D455 to the D415's field first),
+  with the drp_deploy depth post-processing
   disparity -> spatial -> temporal -> depth -> hole filling, true intrinsics);
 - one vlagents `drp` server per checkpoint of `~/drp/ckpt_active` on ports 20101.. (`drp_viser/policies.py`), all
   started at launch, so switching checkpoints is instant; the agent's meta query tells the panel each checkpoint's
@@ -104,13 +107,16 @@ gripper, camera views with noise ablation and table mask, 3D scene), built on RC
 
 Depth pipeline, every step switchable live in the panel's "Depth processing" tab (left panel):
 
-1. camera (rcs_realsense, per frame): IR emitter; 848x480 depth aligned onto the 320x240 colour (fixed); then
+1. camera (rcs_realsense, per frame): IR emitter; depth aligned onto the colour frame (fixed); then
    disparity domain -> spatial filter -> temporal filter -> back to depth -> hole filling (drp_deploy chain,
    librealsense defaults); a device that stops delivering frames is restarted (`restart_attempts` 3);
 2. panel: range gate 0.01-3 m (the renders' clipping range; OFF also tells the policy server to skip its gate),
    optional table-plane mask (fit, margin), per-camera noise ablation (Cameras tab);
 3. policy server (vlagents drp): metres x depth_scale (2 mm steps), pointmap from the true K.
 
+D455 pair (213522250587 = front_left: the arm on the right of its image; 234222300688 = front_right): at
+640x480 fx ~385, ppx/ppy 325.2/243.9 and 329.1/246.4; aligned 640x480 depth leaves 1.8-4.5% without depth (a narrow
+band at the left edge), 848x480 depth would leave the top rows of the 4:3 colour view empty.
 Measured on the two D415s (no depth / in 0.01-3 m): defaults 0.1-0.8% / 77-93%; hole filling off 6-8% / 73-77%;
 also temporal off 9-11%; raw aligned depth 9-11% / 70-76%; emitter off as well 9-15%.
 
@@ -119,11 +125,12 @@ also temporal off 9-11%; raw aligned depth 9-11% / 70-76%; emitter off as well 9
 ~/launch_scripts/realworld_launch.sh --blind        # robot without cameras (noise views)
 ~/launch_scripts/realworld_launch.sh --platform sim # RCS MuJoCo sim dry run
 ~/launch_scripts/realworld_launch.sh --preflight-only
-~/launch_scripts/realworld_launch.sh --camera-fps 60   # D415s at 60 fps (default 30)
+~/launch_scripts/realworld_launch.sh --camera-fps 60   # cameras at 60 fps (default 30)
+~/launch_scripts/realworld_launch.sh --camera-rig d415 # the previous D415 pair
 ```
 
 The launcher runs `realworld_preflight.py` (read-only: robot mode, Desk end effector mass, other FCI clients /
-panels / camera users, both D415s on USB3, the Robotiq adapter, GPU, checkpoints, the fork patches), starts the panel,
+panels / camera users, both cameras of the rig on USB3, the Robotiq adapter, GPU, checkpoints, the fork patches), starts the panel,
 opens it in the browser and keeps everything in `~/drp/logs/realworld/<date>-<time>/` (session log + policy server
 logs). Nothing moves until a button is pressed: once connected the impedance controller holds the measured pose.
 Ctrl-C once: the arm is brought to rest, robot / cameras / gripper are closed, then the policy servers are stopped.

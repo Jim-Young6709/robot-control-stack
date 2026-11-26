@@ -25,7 +25,7 @@ sys.path.insert(0, str(HERE))
 logging.getLogger("OpenGL").setLevel(logging.WARNING)
 
 import franka  # noqa: E402
-from drp_viser.envs import FRONT_D415  # noqa: E402
+from drp_viser.envs import CAMERA_RIGS, DEFAULT_CAMERA_RIG  # noqa: E402
 from drp_viser.policies import BASE_PORT, CKPT_ROOT, POLICY_PYTHON  # noqa: E402
 
 logging.getLogger().setLevel(logging.WARNING)
@@ -79,7 +79,7 @@ def check_setup(args) -> list:
         ok(f"{sys.executable}: {', '.join(MODULES)}")
     # the panel relies on patches in the forks; catch an old checkout early
     try:
-        from rcs_realsense.camera import DRP_D415_KWARGS  # noqa: F401
+        from rcs_realsense.camera import DRP_D415_KWARGS, DRP_D455_KWARGS  # noqa: F401
         from rcs_robotiq2f85.hw import RobotiQ2F85GripperConfig
         from vlagents.policies.drp import DrpAgent
 
@@ -151,7 +151,8 @@ def check_cameras(args) -> None:
     for dev in rs.context().query_devices():
         usb = dev.get_info(rs.camera_info.usb_type_descriptor) if dev.supports(rs.camera_info.usb_type_descriptor) else "?"
         found[dev.get_info(rs.camera_info.serial_number)] = (dev.get_info(rs.camera_info.name), usb)
-    for slot, serial in FRONT_D415.items():
+    print(f"  ..    camera rig {args.camera_rig}")
+    for slot, serial in CAMERA_RIGS[args.camera_rig]["serials"].items():
         if serial not in found:
             fail(f"{slot} camera {serial} not attached (attached: {sorted(found) or 'none'}) -> check its USB cable")
             continue
@@ -236,6 +237,7 @@ def main() -> int:
     p.add_argument("--checkpoint", default="")
     p.add_argument("--policy-port", type=int, default=BASE_PORT)
     p.add_argument("--blind", action="store_true")
+    p.add_argument("--camera-rig", choices=sorted(CAMERA_RIGS), default=DEFAULT_CAMERA_RIG)
     args, _ = p.parse_known_args()
     print(f"pre-flight (read-only) for the DRP panel on {socket.gethostname()}, platform {args.platform}")
     names = check_setup(args)

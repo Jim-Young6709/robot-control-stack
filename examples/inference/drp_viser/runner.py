@@ -26,7 +26,7 @@ import franka
 
 import rcs
 
-from .policies import chunk_of, make_obs, rcs_frames_to_cameras
+from .policies import chunk_of, make_obs, rcs_frames_to_cameras, to_policy_size
 
 logger = logging.getLogger(__name__)
 KEY = franka.ROBOT_KEY
@@ -75,6 +75,9 @@ class RunConfig:
     home_settle_timeout: float = 3.0
     #: a rollout stops when the camera frames are older than this [s]
     max_frame_age_s: float = 0.5
+    #: centre crop of the camera frames before they are resized to the policy's 320x240 (1.0 = whole frame; 0.625 on
+    #: the D455 at 640x480 gives the D415's 54.8 x 42.5 deg). Set at startup (--camera-crop).
+    camera_crop: float = 1.0
 
 
 @dataclass
@@ -568,9 +571,10 @@ class PanelRunner:
                             + ("activating..." if self._grip_activating else f"active={active}")}
         frames = obs.get("frames")
         if frames:
-            self._frames, self._intrinsics = rcs_frames_to_cameras(frames)
             ts = info.get("frame_timestamp") if info else None
-            if ts != self._frames_ts:
+            if ts != self._frames_ts or not self._frames:  # convert only new frames (the loop outruns the cameras)
+                cams, K = rcs_frames_to_cameras(frames)
+                self._frames, self._intrinsics = to_policy_size(cams, K, self.config.camera_crop)
                 self._frames_ts, self._frames_seen_at = ts, time.monotonic()
         with self._lock:
             self._snap = {"q": self._q.copy(), "mode": mode, "motion_ready": mode in ("Idle", "Move", "Sim"),
@@ -588,13 +592,14 @@ class PanelRunner:
             if self._cam_wrapper is not None:
                 obs, _ = self._cam_wrapper.observation({}, {})
                 if obs.get("frames"):
-                    self._frames, self._intrinsics = rcs_frames_to_cameras(obs["frames"])
+                    self._frames, self._intrinsics = to_policy_size(*rcs_frames_to_cameras(obs["frames"]),
+                                                                    self.config.camera_crop)
             self._maybe_preview()
         except Exception:  # noqa: BLE001
             logger.debug("observe failed", exc_info=True)
 
     def _noise_frames(self):
-        """Sim has no cameras: noise in the format of the real ones (blind), nominal D415 K."""
+        """Sim has no cameras: noise in the policy's format (blind), nominal D415 K."""
         h, w = 240, 320
         frames, K = {}, {}
         for slot in self.camera_slots:

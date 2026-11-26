@@ -60,6 +60,46 @@ def rcs_frames_to_cameras(frames: dict) -> tuple[dict[str, np.ndarray], dict[str
     return cams, intrinsics
 
 
+POLICY_W, POLICY_H = 320, 240
+
+
+def to_policy_size(cams: dict, intrinsics: dict, crop: float = 1.0) -> tuple[dict, dict]:
+    """Centre-crops (fraction of width and height; 1.0 = whole frame) and resizes every slot's RGB-D to the policy's
+    320x240, carrying K through the same crop and scale (pixel centres at integer coordinates). RGB is area-averaged,
+    depth sampled nearest: interpolating across an edge would invent surfaces between foreground and background.
+    Frames already 320x240 with crop 1.0 pass through unchanged (the D415 rig)."""
+    from PIL import Image
+
+    out_c, out_K, boxes = {}, {}, {}
+    for key, img in cams.items():
+        h, w = img.shape[:2]
+        if (w, h) == (POLICY_W, POLICY_H) and crop >= 1.0:
+            out_c[key] = img
+            continue
+        ch, cw = int(round(h * min(crop, 1.0))), int(round(w * min(crop, 1.0)))
+        top, left = (h - ch) // 2, (w - cw) // 2
+        boxes[key] = (top, left, ch, cw)
+        img = img[top:top + ch, left:left + cw]
+        if key.endswith("_depth"):
+            ys = np.minimum(((np.arange(POLICY_H) + 0.5) * ch / POLICY_H).astype(int), ch - 1)
+            xs = np.minimum(((np.arange(POLICY_W) + 0.5) * cw / POLICY_W).astype(int), cw - 1)
+            out_c[key] = np.ascontiguousarray(img[ys][:, xs])
+        elif (ch, cw) == (2 * POLICY_H, 2 * POLICY_W):  # the D455 at 640x480: exact 2x2 box average
+            out_c[key] = (img.reshape(POLICY_H, 2, POLICY_W, 2, 3).mean(axis=(1, 3)) + 0.5).astype(np.uint8)
+        else:
+            out_c[key] = np.asarray(Image.fromarray(np.ascontiguousarray(img)).resize((POLICY_W, POLICY_H), Image.BOX))
+    for slot, K in intrinsics.items():
+        if slot not in boxes:
+            out_K[slot] = K
+            continue
+        top, left, ch, cw = boxes[slot]
+        sx, sy = POLICY_W / cw, POLICY_H / ch
+        out_K[slot] = np.array([[K[0, 0] * sx, 0.0, (K[0, 2] - left + 0.5) * sx - 0.5],
+                                [0.0, K[1, 1] * sy, (K[1, 2] - top + 0.5) * sy - 0.5],
+                                [0.0, 0.0, 1.0]], dtype=np.float32)
+    return out_c, out_K
+
+
 def make_obs(joints, goal_joints, cameras: dict, intrinsics: dict | None, *, step: int = 0, episode: int = 0,
              camera_keys: list[str] | None = None, **extra_info) -> Obs:
     """A fresh Obs for one act() call (RemoteAgent.act rewrites the Obs it is given)."""

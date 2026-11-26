@@ -26,7 +26,7 @@ WIDTH, HEIGHT = 320, 240
 #: camera-side depth post-processing steps (rcs_realsense DepthProcessing + emitter), in pipeline order
 CAMERA_DEPTH_STEPS = [
     ("emitter", "IR emitter",
-     "The D415's IR dot projector: gives stereo matching texture on plain surfaces such as the table. OFF: depth only "
+     "The camera's IR dot projector: gives stereo matching texture on plain surfaces such as the table. OFF: depth only "
      "where the scene itself has texture. A capture setting of the camera."),
     ("disparity", "Disparity domain",
      "Run the spatial and temporal filters on disparity (1/depth) instead of depth, as drp_deploy does, so far "
@@ -353,8 +353,8 @@ def build_gui(server, runner: PanelRunner, pool, scene, kin, active_ckpt: str) -
         txt_chain = server.gui.add_text("Pipeline", initial_value="-", disabled=True, multiline=True,
                                         hint="The depth the policy gets, in order. Every switch applies from the next "
                                              "frame, also during a rollout; the camera views show the result.")
-        server.gui.add_markdown("**Camera** (rcs_realsense: 848x480 depth aligned onto the 320x240 colour, then "
-                                "per frame)")
+        server.gui.add_markdown("**Camera** (rcs_realsense: depth aligned onto the colour frame, then per frame; "
+                                "the panel resizes to the policy's 320x240)")
         depth_buttons = {
             key: server.gui.add_button(f"{label}: ?", color="gray", hint=hint, disabled=not runner.has_realsense)
             for key, label, hint in CAMERA_DEPTH_STEPS

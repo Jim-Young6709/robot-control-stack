@@ -1,7 +1,7 @@
 """RCS envs for the panel, built like examples/inference/franka.py builds them, plus what the panel needs:
 
-* the two front RealSense D415s through rcs_realsense with the DRP capture (DRP_D415_KWARGS: 320x240 colour, 848x480
-  depth aligned onto it, drp_deploy depth post-processing, true intrinsics),
+* the two front RealSense cameras through rcs_realsense with the DRP capture (CAMERA_RIGS: the D455 pair at 640x480,
+  or the D415 pair at 320x240; depth aligned onto colour, drp_deploy depth post-processing, true intrinsics),
 * a continuous gripper action (closure slider) and Robotiq activation on demand (activate_on_init=False), so creating
   the env and resetting it moves neither the arm nor the gripper.
 
@@ -16,13 +16,24 @@ import franka  # examples/inference/franka.py: station constants, InferenceConfi
 
 import rcs
 
-#: front cameras of the DRP cell, fixed binding: left/right is the ROBOT's (both stand behind the base); in front_left
-#: the arm is on the right of the image, in front_right on the left
-FRONT_D415 = {"front_left": "747612060067", "front_right": "947122060531"}
-CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS = 320, 240, 30
+#: Front camera pairs of the DRP cell. Fixed binding: left/right is the ROBOT's (both stand behind the base); in
+#: front_left the arm is on the right of the image, in front_right on the left. Select with --camera-rig.
+CAMERA_RIGS = {
+    # since 2026-11-25: two D455 at 640x480 colour + depth (79.4 x 63.9 deg, fx ~385); the panel downscales 2x to the
+    # policy's 320x240. Binding checked from images: 213522250587 has the arm on the right of its image.
+    "d455": {"serials": {"front_left": "213522250587", "front_right": "234222300688"},
+             "size": (640, 480), "kwargs": "DRP_D455_KWARGS"},
+    # until 2026-11-25: two D415 at 320x240 colour + 848x480 depth (54.8 x 42.5 deg), kept for switching back
+    "d415": {"serials": {"front_left": "747612060067", "front_right": "947122060531"},
+             "size": (320, 240), "kwargs": "DRP_D415_KWARGS"},
+}
+DEFAULT_CAMERA_RIG = "d455"
+FRONT_D415 = CAMERA_RIGS["d415"]["serials"]
+CAMERA_FPS = 30
 
 
-def make_hw_env(cfg: "franka.InferenceConfig", cameras: bool = True, camera_fps: int = CAMERA_FPS) -> gym.Env:
+def make_hw_env(cfg: "franka.InferenceConfig", cameras: bool = True, camera_fps: int = CAMERA_FPS,
+                camera_rig: str = DEFAULT_CAMERA_RIG) -> gym.Env:
     """cfg.fps is the control rate: env step pacing and the impedance controller's interpolation window."""
     from rcs_fr3.configs import DefaultFR3HardwareEnv
     from rcs_fr3.creators import (
@@ -53,17 +64,19 @@ def make_hw_env(cfg: "franka.InferenceConfig", cameras: bool = True, camera_fps:
 
     camera_cfgs = None
     if cameras:
-        from rcs_realsense.camera import DRP_D415_KWARGS
+        import rcs_realsense.camera
 
+        rig = CAMERA_RIGS[camera_rig]
+        width, height = rig["size"]
         camera_cfgs = {
             "front": HardwareCameraCreatorConfig(
                 camera_type_id="realsense",
                 camera_cfgs={
-                    slot: rcs.common.BaseCameraConfig(identifier=serial, resolution_width=CAMERA_WIDTH,
-                                                      resolution_height=CAMERA_HEIGHT, frame_rate=int(camera_fps))
-                    for slot, serial in FRONT_D415.items()
+                    slot: rcs.common.BaseCameraConfig(identifier=serial, resolution_width=width,
+                                                      resolution_height=height, frame_rate=int(camera_fps))
+                    for slot, serial in rig["serials"].items()
                 },
-                kwargs=dict(DRP_D415_KWARGS),
+                kwargs=dict(getattr(rcs_realsense.camera, rig["kwargs"])),
             )
         }
     hw_cfg = FR3MultiHardwareEnvCreatorConfig(

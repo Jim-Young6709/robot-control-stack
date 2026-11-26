@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DRP viser panel on robot-control-stack (robots-workstation1: FR3 + Robotiq 2F-85 + two front RealSense D415s).
+"""DRP viser panel on robot-control-stack (robots-workstation1: FR3 + Robotiq 2F-85 + two front RealSense cameras).
 
 The controls of the previous robot PC's panel (checkpoint dropdown, activate / stop / closed-loop rollout, exec
 sliders, EE gizmo + IK goal, saved goals A/B + ping-pong, home + recover, gripper, camera views with noise ablation and
@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import franka  # noqa: E402
 from drp_viser.depth import DepthMask  # noqa: E402
+from drp_viser.envs import CAMERA_RIGS, DEFAULT_CAMERA_RIG  # noqa: E402
 from drp_viser.policies import BASE_PORT, CKPT_ROOT, PolicyPool  # noqa: E402
 from drp_viser.runner import PanelRunner, RunConfig  # noqa: E402
 from rcs._core.common import RobotPlatform  # noqa: E402
@@ -55,7 +56,11 @@ def main() -> int:
     p.add_argument("--control-hz", type=int, default=70,
                    help="control loop rate: env steps, impedance interpolation window, upper limit of the policy rate")
     p.add_argument("--policy-hz", type=float, default=30.0, help="initial policy (exec) rate, the GUI slider changes it")
-    p.add_argument("--camera-fps", type=int, choices=[30, 60], default=30, help="D415 frame rate (colour and depth)")
+    p.add_argument("--camera-fps", type=int, choices=[30, 60], default=30, help="camera frame rate (colour and depth)")
+    p.add_argument("--camera-rig", choices=sorted(CAMERA_RIGS), default=DEFAULT_CAMERA_RIG,
+                   help="front camera pair: d455 (640x480, 79 deg, current) or d415 (320x240, 55 deg, previous)")
+    p.add_argument("--camera-crop", type=float, default=1.0,
+                   help="centre crop before resizing to the policy's 320x240 (0.625 on the D455 = the D415's field)")
     p.add_argument("--noise", nargs="*", default=None, metavar="SLOT",
                    help="camera slots to start with 'Noise out' ON (front_left, front_right)")
     p.add_argument("--config", default=None, help="franka.json-style config (gains, limits, fps); default franka.json")
@@ -93,6 +98,10 @@ def main() -> int:
         print(f"--noise: unknown camera slot(s) {unknown}; have {slots}", file=sys.stderr)
         return 2
     run_cfg.noise_slots = set(noise)
+    if not 0.2 <= args.camera_crop <= 1.0:
+        print(f"--camera-crop {args.camera_crop}: use 0.2-1.0", file=sys.stderr)
+        return 2
+    run_cfg.camera_crop = float(args.camera_crop)
 
     # ------------------------------------------------------------------ policy servers (they take a while: first)
     pool = PolicyPool.from_dir(Path(args.ckpt_root).expanduser(), args.policy_port, Path(args.log_dir).expanduser())
@@ -138,8 +147,11 @@ def main() -> int:
         kin = RcsKinematics(joint_limits=np.stack([franka.FR3_Q_MIN + m, franka.FR3_Q_MAX - m]))
         if platform == RobotPlatform.HARDWARE:
             print(f"connecting to the FR3 (control {cfg.fps} Hz), the gripper port"
-                  + ("" if args.blind else f" and both front D415s ({args.camera_fps} fps)") + " ...")
-            make_env = lambda: make_hw_env(cfg, cameras=not args.blind, camera_fps=args.camera_fps)  # noqa: E731
+                  + ("" if args.blind else f" and the front {args.camera_rig.upper()}s "
+                     f"({'x'.join(map(str, CAMERA_RIGS[args.camera_rig]['size']))} @ {args.camera_fps} fps, "
+                     f"crop {args.camera_crop:g} -> 320x240)") + " ...")
+            make_env = lambda: make_hw_env(cfg, cameras=not args.blind, camera_fps=args.camera_fps,  # noqa: E731
+                                           camera_rig=args.camera_rig)
         else:
             print("starting the RCS MuJoCo sim (FR3 + Robotiq, emulated joint impedance, noise cameras) ...")
             make_env = lambda: make_sim_env(cfg, headless=True)  # noqa: E731

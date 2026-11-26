@@ -130,6 +130,12 @@ DRP_D415_KWARGS: dict[str, typing.Any] = {
 }
 
 
+#: The same DRP capture for D455s at 640x480 (both colour and depth): at that mode the D455 sees 79 x 64 deg (inside the
+#: renders' 48.8-83.7 deg hfov range). 640x480 depth aligns onto the 640x480 colour with only a narrow invalid band at
+#: the left edge, while 16:9 depth modes (848x480) leave the top rows of the 4:3 colour view without depth. The
+#: client downscales the frames to the policy's 320x240.
+DRP_D455_KWARGS: dict[str, typing.Any] = dict(DRP_D415_KWARGS, depth_resolution=(640, 480))
+
 class RealSenseCameraSet(HardwareCamera):
     TIMESTAMP_FACTOR = 1e-3
     CALIBRATION_FRAME_SIZE = 30

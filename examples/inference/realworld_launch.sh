@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Real-world DRP eval on robots-workstation1 in one command: read-only pre-flight checks, then the viser panel on
 # robot-control-stack (drp_viser_app.py): FR3 through rcs_fr3's joint impedance controller, Robotiq 2F-85 through
-# rcs_robotiq2f85, both front D415s through rcs_realsense, one vlagents policy server per checkpoint in
+# rcs_robotiq2f85, both front RealSense cameras (D455s, --camera-rig d415 for the previous pair) through rcs_realsense,
+# one vlagents policy server per checkpoint in
 # ~/drp/ckpt_active (starting on #1). Nothing moves until a button in the panel is pressed.
 #
 #   realworld_launch.sh                          # the full real-world eval
 #   realworld_launch.sh --checkpoint NAME        # start on another checkpoint (the dropdown switches live)
 #   realworld_launch.sh --noise front_left       # start with a view noised out (the panel's toggles stay)
 #   realworld_launch.sh --blind                  # robot without cameras: noise in both views
+#   realworld_launch.sh --camera-rig d415        # the previous D415 pair (default: the D455 pair at 640x480)
+#   realworld_launch.sh --camera-crop 0.625      # D455 cropped to the D415's 55 deg field before 320x240
 #   realworld_launch.sh --platform sim           # dry run in the RCS MuJoCo sim (no robot, cameras or gripper)
 #
 # Launcher options; everything else goes to drp_viser_app.py (--kp/--kd/--torque-limit, --port, --config, ...):
