@@ -7,13 +7,16 @@
 
 Every server answers name() == "drp", so a server's checkpoint is verified through the agent's meta query
 (vlagents fork, branch drp-agent: info["drp_query"] = "meta"). Servers run in their own session, so a Ctrl-C in the
-panel's terminal does not reach them; the panel stops them itself, and a later panel adopts servers left running.
+panel's terminal does not reach them; the panel stops them itself (also on a repeated Ctrl-C), and a later panel
+stops servers an earlier one left running (killed panel) before starting its own.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import signal
 import socket
 import subprocess
@@ -148,6 +151,38 @@ def _warmup_obs(meta: dict) -> Obs:
     return make_obs(q, q, cams, {s: _nominal_K(w, h) for s in meta.get("intrinsics_slots", [])}, step=1)
 
 
+def _listener(port: int):
+    """(pid, command line) of the process listening on a local TCP port, or None."""
+    out = subprocess.run(["ss", "-Hltnp", f"sport = :{port}"], capture_output=True, text=True).stdout
+    for pid in re.findall(r"pid=(\d+)", out):
+        try:
+            cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        return int(pid), cmd
+    return None
+
+
+def _other_panels() -> list:
+    """PIDs of other running DRP panels."""
+    out = subprocess.run(["pgrep", "-f", r"python[0-9.]* .*drp_viser_app\.py"], capture_output=True, text=True).stdout
+    return [int(p) for p in out.split() if int(p) != os.getpid()]
+
+
+def _stop_pid(pid: int, timeout: float = 5.0) -> None:
+    """SIGINT (clean rpyc shutdown), then SIGTERM, then SIGKILL."""
+    for sig, wait in ((signal.SIGINT, timeout), (signal.SIGTERM, 3.0), (signal.SIGKILL, 1.0)):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if not Path(f"/proc/{pid}").exists():
+                return
+            time.sleep(0.1)
+
+
 # ------------------------------------------------------------------------------------------------------ client
 class GuiRemoteAgent(RemoteAgent):
     """RemoteAgent with a bounded request time and without the silent reconnect + resend inside act()."""
@@ -196,7 +231,6 @@ class PolicyServer:
         self.agent: GuiRemoteAgent | None = None
         self.meta: dict | None = None
         self.error: str | None = None
-        self.adopted = False
         self.lock = threading.Lock()  # one request in flight per server (shm buffers + rpyc connection)
 
     @property
@@ -209,10 +243,14 @@ class PolicyServer:
             return s.connect_ex(("127.0.0.1", self.port)) == 0
 
     def start(self):
-        """Adopts a server already listening on the port (checked in wait_ready), else starts one."""
+        """Starts this checkpoint's server. A port still in use (see PolicyPool.clear_leftovers) fails this server
+        with the reason instead of reusing whatever serves there."""
         if self._port_open():
-            self.adopted = True
-            logger.info("port %d already open: adopting it for %s", self.port, self.name)
+            owner = _listener(self.port)
+            self.error = (f"port {self.port} is in use"
+                          + (f" by pid {owner[0]} ({owner[1][:80]})" if owner else "")
+                          + ": another panel's policy server? stop that panel first")
+            logger.error("policy server %s not started: %s", self.name, self.error)
             return
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [str(POLICY_PYTHON), "-m", "vlagents", "start-server", "drp", "--host", "localhost", "--port",
@@ -227,6 +265,8 @@ class PolicyServer:
             return "(no log)"
 
     def wait_ready(self, timeout: float = 180.0, warmup: bool = True) -> dict:
+        if self.error:  # not started (port in use)
+            raise RuntimeError(self.error)
         deadline = time.monotonic() + timeout
         while self.agent is None:
             if self.proc is not None and self.proc.poll() is not None:
@@ -323,16 +363,35 @@ class PolicyPool:
     def names(self) -> list[str]:
         return list(self.servers)
 
+    def clear_leftovers(self) -> None:
+        """Stops vlagents servers still listening on this pool's ports from an earlier panel that did not shut down
+        cleanly (they run in their own session, so they outlive a panel that is killed). Only when no other panel is
+        running: a running panel's servers are left alone (those checkpoints then fail with the reason)."""
+        others = [p for p in _other_panels()]
+        for s in self.servers.values():
+            owner = _listener(s.port)
+            if owner is None:
+                continue
+            pid, cmd = owner
+            if "vlagents" not in cmd or "start-server" not in cmd:
+                continue  # not ours: start() reports the port as in use
+            if others:
+                logger.warning("port %d serves a policy server (pid %d) and another panel is running (pid %s): "
+                               "leaving it alone", s.port, pid, others[0])
+                continue
+            logger.warning("stopping a leftover policy server on port %d (pid %d): %s", s.port, pid, cmd[-90:])
+            _stop_pid(pid)
+
     def start_background(self, first: str | None = None, timeout: float = 180.0, on_progress=None) -> None:
-        """Starts (or adopts) every server, `first` before the others, then waits for all in parallel."""
+        """Clears leftovers, starts every server, `first` before the others, then waits for all in parallel."""
+        self.clear_leftovers()
         order = sorted(self.servers.values(), key=lambda s: s.name != first)
 
         def one(s: PolicyServer):
             try:
                 s.wait_ready(timeout)
                 s.error = None
-                logger.info("policy server ready: %s (port %d, %s)%s", s.name, s.port, s.meta["inputs"],
-                            " adopted" if s.adopted else "")
+                logger.info("policy server ready: %s (port %d, %s)", s.name, s.port, s.meta["inputs"])
             except Exception as exc:  # noqa: BLE001
                 s.error = f"{type(exc).__name__}: {exc}"
                 logger.error("policy server %s not ready: %s", s.name, s.error)

@@ -121,8 +121,8 @@ def check_conflicts(args, n_ckpts: int) -> None:
             if s.connect_ex(("127.0.0.1", port)) == 0:
                 taken.append(port)
     if taken:
-        warn(f"policy port(s) {taken} already serve something: the panel adopts them only if they serve the "
-             f"expected checkpoint (left over from an earlier panel), otherwise that checkpoint fails")
+        warn(f"policy port(s) {taken} are in use: leftover policy servers of an earlier panel are stopped at "
+             f"startup; anything else on them makes that checkpoint fail")
     if clean:
         ok("no other panel, FCI client or camera user")
 

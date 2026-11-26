@@ -120,17 +120,26 @@ def main() -> int:
     runner = server = stop_ui = None
 
     def cleanup() -> None:
-        # arm first (decelerate, close the env: FCI, cameras, gripper port), then the UI, then the policy servers
-        if stop_ui is not None:
-            stop_ui.set()
-        if runner is not None:
-            runner.shutdown()
-        if server is not None:
+        # Arm first (decelerate, close the env: FCI, cameras, gripper port), then the UI, then the policy servers.
+        # A second Ctrl-C (or kill / closed terminal) must not cut this short: the policy servers run in their own
+        # session and would be left running, and the robot connection would be dropped instead of closed.
+        def _wait(signum, frame):
+            print("\n  still shutting down, please wait for 'done.' (Ctrl-\\ forces quit)", flush=True)
+
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, _wait)
+        steps = [
+            ("stopping the UI", lambda: stop_ui is not None and stop_ui.set()),
+            ("bringing the arm to rest, closing the robot, cameras and gripper", lambda: runner is not None and runner.shutdown()),
+            ("closing the web UI", lambda: server is not None and server.stop()),
+            (f"stopping {len(pool.servers)} policy servers", pool.stop_all),
+        ]
+        for what, step in steps:
+            print(f"  {what} ...", flush=True)
             try:
-                server.stop()
-            except Exception:  # noqa: BLE001
-                logger.exception("viser stop failed")
-        pool.stop_all()
+                step()
+            except BaseException:  # noqa: BLE001 - every step runs, whatever the one before did
+                logger.exception("shutdown step failed: %s", what)
 
     def _raise_interrupt(signum, frame):
         raise KeyboardInterrupt
